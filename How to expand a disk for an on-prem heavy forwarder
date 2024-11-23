@@ -1,0 +1,406 @@
+How to expand a disk for an on-prem heavy forwarder
+
+
+Syslog filling up /opt? Disk alerts got you down? Have a somewhat functional guide to increasing the partition size of an on-prem heavy forwarder! With the typical virtualization in use today, it’s pretty easy to have a customer just increase the primary disk size of a host. This disk space will not be immediately available to Splunk and will take a little configuration in order to make this work. There are several different methods that exist out there to expand the disk of a host and this is just a process that works for me.
+Checking the disk
+
+First, you will need to collect some information about this host. I am writing this post using a CentOS Linux 7.7 heavy forwarder running XFS on a logical volume. You can determine the host type with: 
+
+
+
+cat /etc/redhat-release
+Sample output:
+
+
+
+[deepwatch@vsoc-vm ~]$ cat /etc/redhat-release
+
+CentOS Linux release 7.7.1908 (Core)
+Not all releases are in /etc/redhat-release. You can typically poke around in /etc and find the release file and know what kind of host you are working on.
+Second, we need to determine the filesystem type and mount points. You can determine this with:
+
+
+
+df -Th
+Sample output:
+
+
+
+[deepwatch@vsoc-vm deepwatch]# df -Th
+
+Filesystem                   Type      Size  Used Avail Use% Mounted on
+
+devtmpfs                     devtmpfs  3.9G     0  3.9G   0% /dev
+
+tmpfs                        tmpfs     3.9G     0  3.9G   0% /dev/shm
+
+tmpfs                        tmpfs     3.9G   12M  3.9G   1% /run
+
+tmpfs                        tmpfs     3.9G     0  3.9G   0% /sys/fs/cgroup
+
+/dev/mapper/cl_vsoc--vm-root xfs        50G  3.1G   47G   7% /
+
+/dev/sda1                    xfs      1014M  258M  757M  26% /boot
+
+/dev/mapper/cl_vsoc--vm-opt  xfs       192G  127G   65G  67% /opt
+Here you can see that this host is using an XFS filesystem and it is using a logical volume as the filesystem mount points are noted as /dev/mapper/$volume_information. You can confirm the mapping with:
+
+
+
+sudo vgdisplay
+Sample output:
+
+
+
+[deepwatch@vsoc-vm ~]$ sudo vgdisplay
+
+  --- Volume group ---
+
+  VG Name               cl_vsoc-vm
+
+  System ID
+
+  Format                lvm2
+
+  Metadata Areas        1
+
+  Metadata Sequence No  10
+
+  VG Access             read/write
+
+  VG Status             resizable
+
+  MAX LV                0
+
+  Cur LV                3
+
+  Open LV               3
+
+  Max PV                0
+
+  Cur PV                1
+
+  Act PV                1
+
+  VG Size               <299.00 GiB
+
+  PE Size               4.00 MiB
+
+  Total PE              76543
+
+  Alloc PE / Size       76543 / <299.00 GiB
+
+  Free  PE / Size       0 / 0
+
+  VG UUID               36qPfc-u6lP-ef74-1yDT-CY6o-kwTV-L4ZlCs
+Those of you familiar with how this process works will probably note that the sample output above is post disk resize.
+Next, we will need to view the physical disk information. This will tell us where the volume group is mapped and which physical disk we will need to expand. Please run:
+
+
+
+sudo lsblk
+Sample output:
+
+
+
+[deepwatch@vsoc-vm ~]$ lsblk
+
+NAME                 MAJ:MIN RM   SIZE RO TYPE MOUNTPOINT
+
+fd0                    2:0    1     4K  0 disk
+
+sda                    8:0    0   300G  0 disk
+
+├─sda1                 8:1    0     1G  0 part /boot
+
+└─sda2                 8:2    0   249G  0 part
+
+  ├─cl_vsoc--vm-root 253:0    0    50G  0 lvm  /
+
+  ├─cl_vsoc--vm-swap 253:1    0   7.9G  0 lvm  [SWAP]
+
+  └─cl_vsoc--vm-opt  253:2    0 191.1G  0 lvm  /opt
+
+sr0                   11:0    1  1024M  0 rom
+
+If the disk in question is not larger than the partitions added together (e.g. if sda were 250G in the above example, not 300G), the extra space has not been allocated on the back-end yet.  The expansion won’t be able to proceed until this is done.
+Note: if the new disk space is not visible in a vmware based host, running this should help to make the new space visible
+
+
+
+echo 1 > /sys/class/scsi_device/0\:0\:0\:0/device/rescan
+Expanding the disk
+
+This tells us that there is 300GB available on device sda, but that only 250GB is currently being used between partitions sda1 and sda2. Execute the following to probe the disk out:
+
+
+
+sudo partprobe
+This refreshes the filesystem information on the host by forcing a re-read so that we can now expand the disk.
+Now, the part that we need to be sure about, resizing the disk. If you are not comfortable doing this, please ask someone to sanity check your work or make sure that you are doing the steps in the correct order. You will want to run the following to expand the partition:
+
+
+
+sudo parted
+Now that you are in parted, you have the option to run help or run any of the commands associated with expanding the disk depending on how spicy you feel and how confident you are. I always want to first execute:
+
+
+
+print
+Sample output:
+
+
+
+(parted) print
+
+Model: VMware Virtual disk (scsi)
+
+Disk /dev/sda: 322GB
+
+Sector size (logical/physical): 512B/512B
+
+Partition Table: msdos
+
+Disk Flags:
+
+
+Number  Start   End     Size    Type     File system  Flags
+
+ 1      1049kB  1075MB  1074MB  primary  xfs          boot
+
+ 2      1075MB  268GB   267GB   primary               lvm
+note: Does your File system show ext2, ext3, or ext4 with a LVM if so skip to the section heading Other File Systems!
+ 
+I can use this to identify that my logical volume resides on the second partition. So I will now resize that disk with a two part command:
+
+
+
+(parted) resizepart 2
+
+End?  [268GB]? 100%
+The resizepart 2 is what I specify to resize the partition and the second line is parted asking how much of the free space I wish to assign to this logical volume. There are a ton of options and many ways to define how to expand this disk, but typically we will be expanding to 100% of the available free space on the heavy forwarder.
+To verify that your disk has been expanded properly, run print again. 
+Sample output:
+
+
+
+(parted) print
+
+Model: VMware Virtual disk (scsi)
+
+Disk /dev/sda: 322GB
+
+Sector size (logical/physical): 512B/512B
+
+Partition Table: msdos
+
+Disk Flags:
+
+
+Number  Start   End     Size    Type     File system  Flags
+
+ 1      1049kB  1075MB  1074MB  primary  xfs          boot
+
+ 2      1075MB  322GB   321GB   primary               lvm
+The disk has been expanded about 50GB in this example which is what we were expecting to see. Exit parted with:
+
+
+
+quit
+Expanding the filesystem
+
+Expanding with an XFS filesystem over a Logical Volume
+
+So now we have the disk resized, we know it is an XFS filesystem and it is part of a logical volume. Now we need to expand the logical volume that this disk will reside on with the following series of commands:
+pvresize will resize the partition on /dev/sda2 to fill the disk:
+
+
+
+sudo pvresize /dev/sda2
+lvextend will extend the logical volume for the /opt partition on /dev/sda2 to fill the disk:
+
+
+
+sudo lvextend /dev/mapper/cl_vsoc--vm-opt /dev/sda2
+Finally, we grow the actual filesystem mounted at /opt:
+
+
+
+sudo xfs_growfs /opt
+Assuming that there were no errors and everything went according to plan, you should be able to see the disk size increase with:
+
+
+
+df -Th
+Sample output:
+
+
+
+[deepwatch@vsoc-vm ~]$ df -Th
+
+Filesystem                   Type      Size  Used Avail Use% Mounted on
+
+devtmpfs                     devtmpfs  3.9G     0  3.9G   0% /dev
+
+tmpfs                        tmpfs     3.9G     0  3.9G   0% /dev/shm
+
+tmpfs                        tmpfs     3.9G   12M  3.9G   1% /run
+
+tmpfs                        tmpfs     3.9G     0  3.9G   0% /sys/fs/cgroup
+
+/dev/mapper/cl_vsoc--vm-root xfs        50G  3.1G   47G   7% /
+
+/dev/sda1                    xfs      1014M  258M  757M  26% /boot
+
+/dev/mapper/cl_vsoc--vm-opt  xfs       242G  132G  110G  55% /opt
+Congratulations on hopefully eliminating an annoying alert and having more flexibility with the amount of logs you can temporarily store before ingestion!
+Expanding XFS residing directly on a disk
+
+ 
+
+
+
+deepwatch@vsoc-vm ~]$ df -Th
+
+Filesystem               Size  Used Avail Use% Mounted on
+
+/dev/mapper/centos-root   50G  7.4G   43G  15% /
+
+devtmpfs                 7.8G     0  7.8G   0% /dev
+
+tmpfs                    7.8G     0  7.8G   0% /dev/shm
+
+tmpfs                    7.8G  114M  7.7G   2% /run
+
+tmpfs                    7.8G     0  7.8G   0% /sys/fs/cgroup
+
+/dev/sda1               1014M  191M  824M  19% /boot
+
+/dev/sdb                 200G  135G   66G  68% /opt/syslog
+
+/dev/mapper/centos-home   42G  2.8G   39G   7% /home
+
+overlay                   50G  7.4G   43G  15% /var/lib/docker/overlay2/19095dc7bc5a088905eb906b60705687608bcec91aca11d38a9f6d154219fbc2/merged
+
+shm                       64M     0   64M   0% /var/lib/docker/containers/95661f489903f1f684f193fc139c408e9acf0c7183a1fa5574172e801f4d9ee6/mounts/shm
+
+tmpfs                    1.6G     0  1.6G   0% /run/user/0
+
+tmpfs                    1.6G     0  1.6G   0% /run/user/1003
+ 
+
+
+
+[root@DFWPLIM001 deepwatch]# lsblk
+
+lsblk
+
+NAME            MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+
+sda               8:0    0  100G  0 disk
+
+├─sda1            8:1    0    1G  0 part /boot
+
+└─sda2            8:2    0   99G  0 part
+
+  ├─centos-root 253:0    0   50G  0 lvm  /
+
+  ├─centos-swap 253:1    0  7.9G  0 lvm  [SWAP]
+
+  └─centos-home 253:2    0 41.1G  0 lvm  /home
+
+sdb               8:16   0  500G  0 disk /opt/syslog
+
+sr0              11:0    1 1024M  0 rom
+ 
+As we can see here, there is 200GB being used but 500 GB is available.   I went through “Expanding the disk” as written above, but it didn’t seem to do anything.   I was able to expand the filesystem by running:  
+
+
+
+[root@DFWPLIM001 deepwatch]# xfs_growfs /opt/syslog
+
+meta-data=/dev/sdb               isize=512    agcount=4, agsize=13107200 blks
+
+         =                       sectsz=4096  attr=2, projid32bit=1
+
+         =                       crc=1        finobt=0 spinodes=0
+
+data     =                       bsize=4096   blocks=52428800, imaxpct=25
+
+         =                       sunit=0      swidth=0 blks
+
+naming   =version 2              bsize=4096   ascii-ci=0 ftype=1
+
+log      =internal               bsize=4096   blocks=25600, version=2
+
+         =                       sectsz=4096  sunit=1 blks, lazy-count=1
+
+realtime =none                   extsz=4096   blocks=0, rtextents=0
+
+data blocks changed from 52428800 to 131072000
+
+[root@DFWPLIM001 deepwatch]# df -h
+
+Filesystem               Size  Used Avail Use% Mounted on
+
+/dev/mapper/centos-root   50G  7.4G   43G  15% /
+
+devtmpfs                 7.8G     0  7.8G   0% /dev
+
+tmpfs                    7.8G     0  7.8G   0% /dev/shm
+
+tmpfs                    7.8G  114M  7.7G   2% /run
+
+tmpfs                    7.8G     0  7.8G   0% /sys/fs/cgroup
+
+/dev/sda1               1014M  191M  824M  19% /boot
+
+/dev/sdb                 500G  138G  363G  28% /opt/syslog
+
+/dev/mapper/centos-home   42G  2.8G   39G   7% /home
+
+overlay                   50G  7.4G   43G  15% /var/lib/docker/overlay2/19095dc7bc5a088905eb906b60705687608bcec91aca11d38a9f6d154219fbc2/merged
+
+shm                       64M     0   64M   0% /var/lib/docker/containers/95661f489903f1f684f193fc139c408e9acf0c7183a1fa5574172e801f4d9ee6/mounts/shm
+
+tmpfs                    1.6G     0  1.6G   0% /run/user/0
+
+tmpfs                    1.6G     0  1.6G   0% /run/user/1003
+ 
+ Other File Systems ext2 ext3 ext4  with LVM
+
+Open Screen Shot 2019-11-13 at 10.46.49 AM.png
+￼
+This is pre-disk allocation. Older file systems may or may not respond to partprobe and you will have to restart the OS before 
+Open Screen Shot 2019-11-14 at 11.00.12 AM.png
+￼
+here it is shown post reboot with the correct allocation of disk.
+Open Screen Shot 2019-11-14 at 11.00.40 AM.png
+￼
+Open Screen Shot 2019-11-14 at 11.01.08 AM.png
+￼
+From here we can extend the 2 extended partition adding the space to the sda2
+
+sudo fdisk /dev/sda
+Open Screen Shot 2019-11-14 at 11.31.12 AM.png
+￼
+From here we add a new partition with n accepting the default values making note of the logical partition number which is 6 in this case and next we change the type with t on partition number 6 to type 8e for Linux LVM and a final p to confirm that sda6 is created and the size and type are correct.  
+ 
+Open Screen Shot 2019-11-14 at 12.58.16 PM.png
+￼
+And then you will enter w to write changes you will receive and error but this is informing you that to see the newly created partition you will need to update the OS.
+Open Screen Shot 2019-11-14 at 11.33.21 AM.png
+￼
+partprobe will update the OS and then we can use pvcreate to create the physical volume
+Open Screen Shot 2019-11-14 at 11.01.28 AM.png
+￼
+Next we can display the Volume Group with vgdisplay
+Open Screen Shot 2019-11-14 at 11.34.19 AM.png
+￼
+And use vgextend to extend the Volume Group with the new physical volume we just created /dev/sda6
+Open Screen Shot 2019-11-14 at 11.35.10 AM.png
+￼
+using pvscan we can see that the Volume Group has been extended and has 250GB free, so we can use lvextend to extend the logical volume for the LVM /dev/vsoc-vm-vg/root with our physical volume /dev/sda6 
+Open Screen Shot 2019-11-14 at 11.36.06 AM.png
+￼
+lastly we need to extend the file system into this newly available space with resize2fs /dev/vsoc-vm-vg/root this will expand the current file system to use the available space and we can verify with df -h to see that our size is now 491 GB total with 262GB free. 
