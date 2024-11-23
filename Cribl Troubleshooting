@@ -1,0 +1,64 @@
+Problem 1: Customer has stopped receiving logs and no data is making it to Cribl from a specific HF
+Solution
+By default, Cribl adds metadata to the events that pass through it, typically beginning with a fieldname of "cribl_*".  Check that there are no events coming through to any index with this field.
+ |tstats count where index=* cribl_*=* by _time sourcetype
+Look for any blocked queues:  One search to start with:
+index=_internal sourcetype=splunkd group=queue (name=parsingQueue OR name=indexqueue OR name=tcpin_queue OR name=aggqueue) 
+| eval is_blocked=if(blocked=="true",1,0), host_queue=host." - ".name 
+| stats sparkline sum(is_blocked) as blocked,count by host_queue 
+| eval blocked_ratio=round(blocked/count*100,2) 
+| sort 20 -blocked_ratio 
+| eval status=case(blocked_ratio>50.0,"extremely high",blocked_ratio>40.0,"very high",blocked_ratio>20.0,"high",1=1,"normal")
+Verify the outputs exist on the HF and that they are sending to the correct Cribl endpoint
+/opt/splunk/bin/splunk btool outputs list --debug
+Look for the [tcpout:cribl] stanza (typically in the dw-Outputs directory)
+Ensure the Cribl stanza is being utilized within props/transforms
+Typically located in /opt/splunk/etc/apps/dw-Outputs/local/transforms.conf or props.conf
+Ensure the log in question is being routed to the tcpout:cribl stanza
+ 
+
+Problem 2: Cribl Stream not receiving data over Splunk HEC
+Error: "Invalid token"
+Cause: Auth token(s) are defined, but the token specified in the HEC request doesn't match any defined tokens, therefore it's invalid.
+
+Solution
+Search the HEC Metrics log which is displayed in a JSON format.
+
+index="_introspection" token
+series = http_event_collector and per-token metrics series = http_event_collector_token)
+Also check the data Inputs to see if the HEC has been disabled.
+
+ 
+
+Problem 3: Client states logs in Cribl are unable to send to the Splunk HF via HEC and are backing up within Cribl
+Solution
+Verify the status of the HEC input
+
+Check the data Inputs to see if the HEC has been disabled.
+
+Send a test event to the HEC endpoint via curl to verify its functioning
+curl -k https://hf1.<client>.deepwatch.com:8088/services/collector -H 'Authorization: Splunk <token>' -d '{"event":"DW-Test"}'
+Looking for a response of “{"text":"Success","code":0}”
+May need to whitelist your IP within AWS for the heavy forwarder to see the request.
+Verify cribl logs are making it to the HEC endpoint
+Run a tcpdump to verify if any traffic is coming in over this port
+sudo tcpdump -i any -nnvvAs0 port 8088
+Verify the client is using the correct HEC token
+ 
+
+Problem 4: Cribl Stream stops receiving data from Splunk
+Error: "WARN AutoLoadBalancedConnectionStrategy [24728 TcpOutEloop] - Forwarder configured to use protocol level=0, which is no longer supported, will use the lowest supported protocol level=1"
+
+Cause: In Splunk 9.1+, v4 of the Splunk protocol is the default version, while v3 is the default in Cribl Stream.
+
+Solution
+Workaround is putting this stanza into their outputs for configurations that send to cribl from HF's to force the older, Cribl compatible version to be used:
+[tcpout]
+enableOldS2SProtocol = true
+An alternative to the above is to change the default S2S version within Cribl Stream as noted by Cribl here.
+
+Max S2S version: The highest version of the Splunk-to-Splunk protocol to expose during handshake. Defaults to v3; v4 is also available.
+
+
+
+ 
